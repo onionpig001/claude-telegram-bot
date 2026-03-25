@@ -37,6 +37,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS chat_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
+                username TEXT,
                 role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
                 content TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -61,11 +62,11 @@ def load_history(user_id: int) -> list:
     return [{"role": r, "content": c} for r, c in reversed(rows)]
 
 
-def append_history(user_id: int, role: str, content: str):
+def append_history(user_id: int, role: str, content: str, username: str = None):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)",
-            (user_id, role, content)
+            "INSERT INTO chat_history (user_id, username, role, content) VALUES (?, ?, ?, ?)",
+            (user_id, username, role, content)
         )
 
 
@@ -110,15 +111,19 @@ async def run_claude(user_id: int, message: str) -> str:
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not is_allowed(user.id):
-        await update.message.reply_text('❌ 无权限')
-        return
-
     text = update.message.text or update.message.caption or ''
     if not text:
         return
 
-    logger.info(f"[{user.id}] {user.first_name}: {text[:80]}")
+    username = user.username or user.first_name
+    logger.info(f"[{user.id}] {username}: {text[:80]}")
+
+    # 所有消息都记录，无论是否有权限
+    append_history(user.id, 'user', text, username)
+
+    if not is_allowed(user.id):
+        await update.message.reply_text('❌ 无权限')
+        return
 
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id,
@@ -126,10 +131,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     reply = await run_claude(user.id, text)
-
-    # 记录本轮对话到历史
-    append_history(user.id, 'user', text)
-    append_history(user.id, 'assistant', reply)
+    append_history(user.id, 'assistant', reply, username)
 
     # Telegram 消息限制 4096 字符，分段发送
     max_len = 4000
