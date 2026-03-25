@@ -95,6 +95,7 @@ async def run_claude(user_id: int, message: str) -> str:
     try:
         result = await asyncio.create_subprocess_exec(
             CLAUDE_BIN, '-p', prompt, '--output-format', 'text',
+            '--allowedTools', 'Read,Write,Edit,Glob,Grep,Bash',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
