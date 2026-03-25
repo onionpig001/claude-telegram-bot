@@ -89,6 +89,9 @@ def build_prompt(user_id: int, new_message: str) -> str:
     return "\n".join(lines)
 
 
+CLAUDE_TIMEOUT = int(os.environ.get('CLAUDE_TIMEOUT', '600'))  # 默认10分钟
+
+
 async def run_claude(user_id: int, message: str) -> str:
     """调用 claude -p 并返回结果（带上下文）"""
     prompt = build_prompt(user_id, message)
@@ -99,15 +102,26 @@ async def run_claude(user_id: int, message: str) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(result.communicate(), timeout=120)
+        stdout, stderr = await asyncio.wait_for(result.communicate(), timeout=CLAUDE_TIMEOUT)
         output = stdout.decode('utf-8').strip()
         if not output and stderr:
             output = f"⚠️ 错误: {stderr.decode('utf-8').strip()[:200]}"
         return output or '（无响应）'
     except asyncio.TimeoutError:
-        return '⏱️ 超时了（超过2分钟），请换个简短的问题试试'
+        result.kill()
+        return f'⏱️ 超时了（超过{CLAUDE_TIMEOUT//60}分钟），任务已终止'
     except Exception as e:
         return f'❌ 调用失败: {e}'
+
+
+async def keep_typing(bot, chat_id: int, stop_event: asyncio.Event):
+    """每4秒发送一次 typing 动作，直到 stop_event 被设置"""
+    while not stop_event.is_set():
+        try:
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        except Exception:
+            pass
+        await asyncio.sleep(4)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -126,12 +140,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('❌ 无权限')
         return
 
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id,
-        action=ChatAction.TYPING
+    stop_typing = asyncio.Event()
+    typing_task = asyncio.create_task(
+        keep_typing(context.bot, update.effective_chat.id, stop_typing)
     )
 
-    reply = await run_claude(user.id, text)
+    try:
+        reply = await run_claude(user.id, text)
+    finally:
+        stop_typing.set()
+        typing_task.cancel()
+
     append_history(user.id, 'assistant', reply, username)
 
     # Telegram 消息限制 4096 字符，分段发送
